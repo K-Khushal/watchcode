@@ -12,9 +12,11 @@
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {
-    "@watchcode/shared": "workspace:*"
+    "@watchcode/shared": "workspace:*",
+    "ws": "^8.20.0"
   },
   "devDependencies": {
+    "@types/ws": "^8.18.1",
     "typescript": "^5.4.5"
   }
 }

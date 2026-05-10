@@ -57,3 +57,5 @@ export * from "./logger.js";
 export * from "./pidfile.js";
 export * from "./server.js";
 export * from "./rules.js";
+export * from "./slug.js";
+export * from "./wsHub.js";

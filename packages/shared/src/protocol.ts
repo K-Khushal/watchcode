@@ -38,9 +38,20 @@ export const DaemonStatusMsg = z.object({
   version: z.string(),
 });
 
+// watch → daemon. HMAC fields land in slice 4; in slice 3 they are accepted
+// but ignored. `decision: ""` is reserved for future cancel/ack flows.
+export const ApprovalResponseMsg = z.object({
+  type: z.literal("approval_response"),
+  request_id: z.string().uuid(),
+  decision: z.enum(["approve", "always", "deny"]),
+  nonce: z.number().int().nonnegative().optional(),
+  hmac: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+});
+
 export type ApprovalRequest = z.infer<typeof ApprovalRequestMsg>;
 export type ApprovalResolved = z.infer<typeof ApprovalResolvedMsg>;
 export type DaemonStatus = z.infer<typeof DaemonStatusMsg>;
+export type ApprovalResponse = z.infer<typeof ApprovalResponseMsg>;
 
 export type DecisionKind = "approve" | "always" | "deny";
 

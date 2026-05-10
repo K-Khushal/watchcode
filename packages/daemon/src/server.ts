@@ -1,7 +1,10 @@
 import { createServer, IncomingMessage, ServerResponse, Server } from "node:http";
 import { randomUUID } from "node:crypto";
+import { basename } from "node:path";
 import { Queue, PendingApproval } from "./queue.js";
 import { buildPermissionRules, buildTitle } from "./rules.js";
+import { SlugExtractor } from "./slug.js";
+import { WsHub } from "./wsHub.js";
 import { Logger } from "./logger.js";
 import {
   DAEMON_HOST,
@@ -16,6 +19,7 @@ export interface ServerDeps {
   port?: number;
   host?: string;
   version?: string;
+  heartbeatMs?: number;
 }
 
 export interface RunningServer {
@@ -25,6 +29,8 @@ export interface RunningServer {
 }
 
 const MAX_BODY_BYTES = 256 * 1024;
+const BODY_TRUNCATE_CHARS = 300;
+const DEFAULT_HEARTBEAT_MS = 5_000;
 
 function readJsonBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
@@ -110,11 +116,19 @@ function isDecisionBody(x: unknown): x is DecisionPostBody {
   return o.decision === "approve" || o.decision === "always" || o.decision === "deny";
 }
 
+function buildBody(toolInput: Record<string, unknown>): string {
+  const json = JSON.stringify(toolInput);
+  if (json.length <= BODY_TRUNCATE_CHARS) return json;
+  return json.slice(0, BODY_TRUNCATE_CHARS - 1) + "…";
+}
+
 export function startServer(deps: ServerDeps): Promise<RunningServer> {
   const { queue, logger } = deps;
   const port = deps.port ?? DAEMON_PORT;
   const host = deps.host ?? DAEMON_HOST;
   const version = deps.version ?? "0.0.0";
+  const heartbeatMs = deps.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
+  const slugExtractor = new SlugExtractor();
 
   const server = createServer(async (req, res) => {
     try {
@@ -132,13 +146,16 @@ export function startServer(deps: ServerDeps): Promise<RunningServer> {
           return;
         }
         const id = randomUUID();
+        const slug = slugExtractor.extract(body.session_id, body.transcript_path);
+        const cwd_basename = basename(body.cwd) || body.cwd;
+        const title = buildTitle(body.tool_name, body.tool_input);
         const pending: PendingApproval = {
           id,
           session_id: body.session_id,
           tool_name: body.tool_name,
           tool_input: body.tool_input,
-          title: buildTitle(body.tool_name, body.tool_input),
-          body: JSON.stringify(body.tool_input).slice(0, 300),
+          title,
+          body: buildBody(body.tool_input),
           permissionRules: buildPermissionRules(body.tool_name, body.tool_input),
           createdAt: Date.now(),
         };
@@ -148,6 +165,21 @@ export function startServer(deps: ServerDeps): Promise<RunningServer> {
           session_id: body.session_id,
           tool_name: body.tool_name,
         });
+
+        // Fan-out to all connected watches.
+        hub.broadcast({
+          type: "approval_request",
+          id,
+          session: { id: body.session_id, slug, cwd_basename },
+          tool: {
+            name: body.tool_name,
+            title,
+            body: pending.body,
+            raw_input: body.tool_input,
+          },
+          timestamp: new Date(pending.createdAt).toISOString(),
+        });
+
         send(res, 200, { id, permissionRules: pending.permissionRules });
         return;
       }
@@ -163,7 +195,6 @@ export function startServer(deps: ServerDeps): Promise<RunningServer> {
         );
         const initial = queue.state(id);
         if (initial === "unknown") {
-          // Hook should treat this as "stop polling" — same semantics as local-resolved.
           send(res, 404, { error: "unknown id" });
           return;
         }
@@ -183,7 +214,7 @@ export function startServer(deps: ServerDeps): Promise<RunningServer> {
         return;
       }
 
-      // POST /pending/:id/decision (used by curl/watch to inject)
+      // POST /pending/:id/decision (used by curl/watch over HTTP, during spike)
       if (req.method === "POST" && decisionMatch) {
         const id = decisionMatch[1]!;
         const body = await readJsonBody(req);
@@ -191,9 +222,8 @@ export function startServer(deps: ServerDeps): Promise<RunningServer> {
           send(res, 400, { error: "invalid decision body" });
           return;
         }
-        const pending = queue.findByRequestId(id);
-        if (!pending) {
-          // 404 = never enqueued; 409 = already resolved
+        const ok = applyWatchDecision(id, body);
+        if (!ok) {
           if (queue.state(id) === "resolved") {
             send(res, 409, { error: "already resolved" });
           } else {
@@ -201,19 +231,7 @@ export function startServer(deps: ServerDeps): Promise<RunningServer> {
           }
           return;
         }
-        const decision: DaemonDecision =
-          body.decision === "always"
-            ? {
-                kind: "always",
-                permissionRules:
-                  body.permissionRules ?? pending.permissionRules,
-              }
-            : { kind: body.decision };
-        const ok = queue.resolve(id, decision);
-        logger.info("resolve", { id, decision: body.decision, accepted: ok });
-        // Idempotent: a second resolve for an already-resolved id returns 409,
-        // not 404, so callers can distinguish "never enqueued" from "raced".
-        send(res, ok ? 204 : 409);
+        send(res, 204);
         return;
       }
 
@@ -225,6 +243,14 @@ export function startServer(deps: ServerDeps): Promise<RunningServer> {
         const id = localMatch[1]!;
         const ok = queue.resolveLocal(id);
         logger.info("resolve_local", { id, accepted: ok });
+        if (ok) {
+          hub.broadcast({
+            type: "approval_resolved",
+            request_id: id,
+            resolved_by: "local",
+            decision: "",
+          });
+        }
         send(res, 204);
         return;
       }
@@ -257,6 +283,48 @@ export function startServer(deps: ServerDeps): Promise<RunningServer> {
     }
   });
 
+  function applyWatchDecision(
+    id: string,
+    body: { decision: "approve" | "always" | "deny"; permissionRules?: string[] },
+  ): boolean {
+    const pending = queue.findByRequestId(id);
+    if (!pending) return false;
+    const decision: DaemonDecision =
+      body.decision === "always"
+        ? {
+            kind: "always",
+            permissionRules: body.permissionRules ?? pending.permissionRules,
+          }
+        : { kind: body.decision };
+    const ok = queue.resolve(id, decision);
+    logger.info("resolve", { id, decision: body.decision, accepted: ok });
+    if (ok) {
+      hub.broadcast({
+        type: "approval_resolved",
+        request_id: id,
+        resolved_by: "watch",
+        decision: body.decision,
+      });
+    }
+    return ok;
+  }
+
+  // hub is constructed below; declare for closure visibility above.
+  // eslint-disable-next-line prefer-const, @typescript-eslint/no-use-before-define
+  let hub!: WsHub;
+  hub = new WsHub({
+    httpServer: server,
+    logger,
+    heartbeatMs,
+    version,
+    pendingCount: () => queue.list().length,
+    activeSessions: () =>
+      new Set(queue.list().map((p) => p.session_id)).size,
+    onApprovalResponse: (msg) => {
+      applyWatchDecision(msg.request_id, { decision: msg.decision });
+    },
+  });
+
   return new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(port, host, () => {
@@ -266,10 +334,10 @@ export function startServer(deps: ServerDeps): Promise<RunningServer> {
       resolve({
         server,
         port: actualPort,
-        close: () =>
-          new Promise<void>((res) => {
-            server.close(() => res());
-          }),
+        close: async () => {
+          await hub.close();
+          await new Promise<void>((res) => server.close(() => res()));
+        },
       });
     });
   });
