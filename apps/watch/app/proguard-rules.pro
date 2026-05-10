@@ -1,0 +1,4 @@
+-keep class okhttp3.** { *; }
+-keep class kotlinx.serialization.** { *; }
+-dontwarn okhttp3.**
+-dontwarn kotlinx.serialization.**
