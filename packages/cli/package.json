@@ -15,8 +15,10 @@
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {
+    "@watchcode/daemon": "workspace:*",
+    "@watchcode/hook": "workspace:*",
     "@watchcode/shared": "workspace:*",
-    "@watchcode/hook": "workspace:*"
+    "commander": "^14.0.3"
   },
   "devDependencies": {
     "typescript": "^5.4.5"
