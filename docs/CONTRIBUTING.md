@@ -1,6 +1,6 @@
 # Contributing to WatchCode
 
-Thank you for your interest in WatchCode. This document covers everything needed to get a dev environment running, understand the project structure, and get a change merged.
+Thank you for your interest in WatchCode. This document walks you through everything from a clean machine to a running emulator, then covers how to make and submit changes.
 
 ---
 
@@ -9,29 +9,30 @@ Thank you for your interest in WatchCode. This document covers everything needed
 1. [Prerequisites](#prerequisites)
 2. [Cloning and first build](#cloning-and-first-build)
 3. [Repository layout](#repository-layout)
-4. [Running the daemon locally](#running-the-daemon-locally)
-5. [Running tests](#running-tests)
-6. [Lint and typecheck](#lint-and-typecheck)
-7. [Building the watch APK](#building-the-watch-apk)
-8. [Making changes](#making-changes)
-9. [Opening a pull request](#opening-a-pull-request)
-10. [Code style](#code-style)
-11. [Commit conventions](#commit-conventions)
-12. [Reporting bugs](#reporting-bugs)
+4. [Android Studio setup](#android-studio-setup)
+5. [Shell environment variables](#shell-environment-variables)
+6. [Creating a Wear OS emulator](#creating-a-wear-os-emulator)
+7. [Building and running the watch app](#building-and-running-the-watch-app)
+8. [Running the daemon locally](#running-the-daemon-locally)
+9. [Running tests](#running-tests)
+10. [Lint and typecheck](#lint-and-typecheck)
+11. [Making changes](#making-changes)
+12. [Opening a pull request](#opening-a-pull-request)
+13. [Code style](#code-style)
+14. [Commit conventions](#commit-conventions)
+15. [Reporting bugs](#reporting-bugs)
 
 ---
 
 ## Prerequisites
 
-| Tool | Version | Install |
-|------|---------|---------|
+| Tool | Version | Notes |
+|------|---------|-------|
 | Node.js | ≥ 20 | [nodejs.org](https://nodejs.org) or `nvm install 20` |
-| pnpm | ≥ 9 | `npm install -g pnpm` or `corepack enable` |
-| Android Studio | Hedgehog or later | Required only for the Wear OS app |
-| JDK | 17 | Bundled with Android Studio, or `brew install openjdk@17` |
-| ADB | any | Bundled with Android Studio platform-tools |
+| pnpm | ≥ 9 | `npm install -g pnpm` |
+| Android Studio | Hedgehog or later | Required for the Wear OS app — bundles JDK and ADB |
 
-A Galaxy Watch 6 or a Wear OS 4 emulator is needed to run the watch app end-to-end.
+> **JDK and ADB** are bundled inside Android Studio. You do not need to install them separately — the shell setup in step 5 points your terminal at the bundled copies.
 
 ---
 
@@ -40,8 +41,17 @@ A Galaxy Watch 6 or a Wear OS 4 emulator is needed to run the watch app end-to-e
 ```sh
 git clone https://github.com/K-Khushal/watchcode.git
 cd watchcode
-pnpm install       # installs all workspace packages
-pnpm -r build      # compiles shared → daemon / hook / cli (in dependency order)
+pnpm install       # installs all workspace packages and links them
+pnpm -r build      # compiles shared → daemon / hook / cli in dependency order
+```
+
+Verify the build produced output:
+
+```sh
+ls packages/shared/dist    # index.js, index.d.ts, ...
+ls packages/daemon/dist
+ls packages/hook/dist
+ls packages/cli/dist
 ```
 
 `pnpm install` links the four TypeScript packages as workspace dependencies, so changes to `@watchcode/shared` are immediately visible in `daemon`, `hook`, and `cli` without a re-publish step.
@@ -66,6 +76,113 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full file-level breakdown and mod
 
 ---
 
+## Android Studio setup
+
+1. Download **Android Studio** (Hedgehog or later) from [developer.android.com/studio](https://developer.android.com/studio). Pick the **Apple Silicon** `.dmg` if you are on an M-series Mac.
+
+2. Open the `.dmg`, drag Android Studio to `/Applications`, and launch it.
+
+3. The **Setup Wizard** runs on first launch. Choose **Standard** install, accept all SDK licenses, and let it download the SDK and platform tools (~5–10 min).
+
+4. When the wizard finishes, open **More Actions → SDK Manager** and confirm the following are installed:
+
+   - **SDK Platforms** tab → **Android 14.0 (API 34)** ✓
+   - **SDK Tools** tab → **Android SDK Build-Tools 34**, **Android SDK Platform-Tools** ✓
+
+---
+
+## Shell environment variables
+
+Android Studio installs the SDK to `~/Library/Android/sdk` and bundles its own JDK. Add both to your shell so that `adb`, `java`, and Gradle all work from the terminal.
+
+Open `~/.zshrc` in any editor and add these lines near the top, **before** any other `PATH` exports:
+
+```sh
+# Android SDK
+export ANDROID_HOME="$HOME/Library/Android/sdk"
+export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+export PATH="$JAVA_HOME/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+```
+
+Save the file, then reload it in every open terminal:
+
+```sh
+source ~/.zshrc
+```
+
+Verify both tools are found:
+
+```sh
+java -version   # should print OpenJDK 21.x
+adb version     # should print Android Debug Bridge version 1.0.x
+```
+
+---
+
+## Creating a Wear OS emulator
+
+> Skip this section if you have a physical Galaxy Watch 6 (or any Wear OS 4+ device) — you can use ADB over Wi-Fi instead (see [watch-install.md](watch-install.md)).
+
+1. In Android Studio, open **More Actions → Device Manager → Create Virtual Device**.
+2. Click **New Hardware Profile** or pick an existing Wear OS profile (e.g. **Wear OS Small Round**). Click **Next**.
+3. On the **System Image** step, select the **Wear OS** tab and download/select:
+   - **Wear OS 5 — ARM 64 v8a** (API 34) — matches our `targetSdk 34`
+4. Click **Finish**, then click the **▶ Play** button next to the new device to start it.
+5. Wait for the emulator to fully boot (the watch face appears).
+
+Confirm ADB sees it:
+
+```sh
+adb devices
+# emulator-5554   device
+```
+
+---
+
+## Building and running the watch app
+
+### Build the APK
+
+```sh
+cd apps/watch
+./gradlew assembleDebug
+```
+
+First run downloads Gradle (~2 min) and SDK dependencies. Subsequent builds take a few seconds. The APK lands at:
+
+```
+apps/watch/app/build/outputs/apk/debug/app-debug.apk
+```
+
+### Install on the emulator
+
+```sh
+adb -s emulator-5554 install -r apps/watch/app/build/outputs/apk/debug/app-debug.apk
+# Performing Streamed Install
+# Success
+```
+
+### Launch the app
+
+```sh
+adb -s emulator-5554 shell am start -n com.watchcode/.MainActivity
+```
+
+You should see **"Hello WatchCode"** centered on the watch face.
+
+### Install on a physical watch (optional)
+
+Enable ADB over Wi-Fi on the watch (**Settings → Developer options → Wireless debugging**), note the IP, then:
+
+```sh
+adb connect <watch-ip>:5555
+adb install apps/watch/app/build/outputs/apk/debug/app-debug.apk
+```
+
+See [watch-install.md](watch-install.md) for detailed step-by-step instructions.
+
+---
+
 ## Running the daemon locally
 
 ```sh
@@ -79,7 +196,7 @@ node packages/daemon/dist/index.js
 node packages/cli/dist/cli.js start
 ```
 
-The daemon binds to `127.0.0.1:9876`. You can smoke-test it with:
+The daemon binds to `127.0.0.1:9876`. Smoke-test it with:
 
 ```sh
 curl -s http://127.0.0.1:9876/status | jq .
@@ -90,11 +207,11 @@ curl -s http://127.0.0.1:9876/status | jq .
 ## Running tests
 
 ```sh
-pnpm -r test          # run all vitest suites across every package
-pnpm --filter @watchcode/daemon test   # run tests for one package only
+pnpm -r test                                # all packages
+pnpm --filter @watchcode/daemon test        # one package only
 ```
 
-Tests live alongside source in each package's `test/` directory. Integration tests spin up a real daemon on an ephemeral port — no mocking of the HTTP/WS stack.
+Tests live in each package's `test/` directory. Integration tests spin up a real daemon on an ephemeral port — no mocking of the HTTP/WS stack.
 
 ---
 
@@ -105,28 +222,7 @@ pnpm -r lint          # ESLint across all packages
 pnpm -r typecheck     # tsc --noEmit (faster than a full build)
 ```
 
-Both must pass with zero errors before a PR is ready for review. Warnings from `@typescript-eslint/no-explicit-any` are tolerated in stub files during early slices but should be resolved before the slice is marked done.
-
----
-
-## Building the watch APK
-
-Open Android Studio and import `apps/watch/`, or build from the terminal:
-
-```sh
-cd apps/watch
-./gradlew assembleDebug
-# Output: app/build/outputs/apk/debug/app-debug.apk
-```
-
-To install on a connected watch over ADB Wi-Fi:
-
-```sh
-adb connect <watch-ip>:5555
-adb install app/build/outputs/apk/debug/app-debug.apk
-```
-
-See [watch-install.md](watch-install.md) for step-by-step ADB setup on Galaxy Watch 6.
+Both must pass with zero errors before a PR is ready for review.
 
 ---
 
