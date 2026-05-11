@@ -17,7 +17,14 @@
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
         android:theme="@style/Theme.WatchCode">
+        <!--
+          usesCleartextTraffic=true is required because the daemon speaks plain ws://
+          on the loopback / LAN interface. Slice 4 wraps the link with HMAC; if a
+          future slice adds TLS the daemon switches to wss:// and this attribute
+          can be dropped.
+        -->
 
         <activity
             android:name=".MainActivity"

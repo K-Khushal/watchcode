@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.wifi.WifiManager
 import android.os.IBinder
+import android.util.Log
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
 import com.watchcode.BuildConfig
@@ -42,8 +43,8 @@ class ConnectionService : LifecycleService() {
 
     override fun onCreate() {
         super.onCreate()
-        Notifications.ensureChannel(this)
-        startForeground(Notifications.NOTIFICATION_ID, Notifications.build(this, ConnectionState.Connecting))
+        Notifications.ensureChannels(this)
+        startForeground(Notifications.NOTIFICATION_ID, Notifications.buildOngoing(this, ConnectionState.Connecting))
         wifiLock = (getSystemService(Context.WIFI_SERVICE) as WifiManager)
             .createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "watchcode:wifi")
             .apply { setReferenceCounted(false); acquire() }
@@ -81,11 +82,17 @@ class ConnectionService : LifecycleService() {
 
     private fun handle(event: ServerEvent) {
         when (event) {
-            is ServerEvent.ApprovalRequest -> _approvals.update { it + event }
-            is ServerEvent.ApprovalResolved -> _approvals.update { list ->
-                list.filter { it.id != event.request_id }
+            is ServerEvent.ApprovalRequest -> {
+                Log.i(TAG, "approval_request: id=${event.id} tool=${event.tool.name} title=${event.tool.title}")
+                _approvals.update { it + event }
+                postApprovalNotification(event)
             }
-            is ServerEvent.DaemonStatus -> Unit // heartbeat; reserved for UI in slice 5
+            is ServerEvent.ApprovalResolved -> {
+                Log.i(TAG, "approval_resolved: id=${event.request_id} by=${event.resolved_by}")
+                _approvals.update { list -> list.filter { it.id != event.request_id } }
+                cancelApprovalNotification()
+            }
+            is ServerEvent.DaemonStatus -> Unit // heartbeat; quiet by design
         }
     }
 
@@ -108,15 +115,48 @@ class ConnectionService : LifecycleService() {
         // that was just torn down.
         try {
             val mgr = getSystemService(android.app.NotificationManager::class.java)
-            mgr?.notify(Notifications.NOTIFICATION_ID, Notifications.build(this, state))
+            mgr?.notify(Notifications.NOTIFICATION_ID, Notifications.buildOngoing(this, state))
         } catch (_: Throwable) {
             // Notification updates are best-effort; never crash the loop.
+        }
+    }
+
+    private fun postApprovalNotification(req: ServerEvent.ApprovalRequest) {
+        try {
+            val mgr = getSystemService(android.app.NotificationManager::class.java) ?: return
+            mgr.notify(
+                Notifications.APPROVAL_NOTIFICATION_ID,
+                Notifications.buildApproval(this, req.id, req.tool.title, req.tool.body),
+            )
+        } catch (_: Throwable) {
+            // Notification post is best-effort; the in-app card is the source of truth.
+        }
+    }
+
+    private fun cancelApprovalNotification() {
+        try {
+            getSystemService(android.app.NotificationManager::class.java)
+                ?.cancel(Notifications.APPROVAL_NOTIFICATION_ID)
+        } catch (_: Throwable) {
+            // ignore
         }
     }
 
     override fun onBind(intent: Intent): IBinder {
         super.onBind(intent)
         return binder
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_RESPOND) {
+            val id = intent.getStringExtra(EXTRA_REQUEST_ID)
+            val decision = intent.getStringExtra(EXTRA_DECISION)
+            if (!id.isNullOrEmpty() && !decision.isNullOrEmpty()) {
+                Log.i(TAG, "responding from notification: id=$id decision=$decision")
+                respond(id, decision)
+            }
+        }
+        return super.onStartCommand(intent, flags, startId)
     }
 
     override fun onDestroy() {
@@ -128,6 +168,12 @@ class ConnectionService : LifecycleService() {
     }
 
     companion object {
+        private const val TAG = "WatchCodeService"
+
+        const val ACTION_RESPOND = "com.watchcode.action.RESPOND"
+        const val EXTRA_REQUEST_ID = "request_id"
+        const val EXTRA_DECISION = "decision"
+
         fun start(ctx: Context) {
             val intent = Intent(ctx, ConnectionService::class.java)
             androidx.core.content.ContextCompat.startForegroundService(ctx, intent)

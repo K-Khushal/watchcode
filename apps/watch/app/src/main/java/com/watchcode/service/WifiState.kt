@@ -11,9 +11,11 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 
 /**
- * Emits true while at least one validated WiFi network has internet capability.
- * Used by [com.watchcode.net.Reconnector] to short-circuit backoff when the
- * watch comes back to a usable network.
+ * Emits true while the watch has *any* validated network with internet
+ * capability — WiFi, cellular, or a tethered companion. Used by
+ * [com.watchcode.net.Reconnector] to short-circuit backoff when the watch
+ * regains connectivity. Restricting to WiFi alone strands the watch when
+ * it falls back to LTE on a real device (or when an emulator is on cellular).
  */
 fun Context.wifiAvailableFlow(): Flow<Boolean> = callbackFlow {
     val cm = getSystemService(ConnectivityManager::class.java)
@@ -23,7 +25,6 @@ fun Context.wifiAvailableFlow(): Flow<Boolean> = callbackFlow {
         return@callbackFlow
     }
     val request = NetworkRequest.Builder()
-        .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
         .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
         .addCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
         .build()
@@ -32,10 +33,10 @@ fun Context.wifiAvailableFlow(): Flow<Boolean> = callbackFlow {
         override fun onLost(network: Network) { trySend(false) }
     }
     cm.registerNetworkCallback(request, callback)
-    // Seed with current state.
+    // Seed with current state — any active network with internet means we can try.
     val seed = cm.activeNetwork
         ?.let(cm::getNetworkCapabilities)
-        ?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+        ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
     trySend(seed)
     awaitClose { runCatching { cm.unregisterNetworkCallback(callback) } }
 }.distinctUntilChanged()

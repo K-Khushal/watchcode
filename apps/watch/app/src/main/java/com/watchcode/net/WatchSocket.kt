@@ -1,5 +1,6 @@
 package com.watchcode.net
 
+import android.util.Log
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -24,27 +25,33 @@ class WatchSocket(
     private val socket = AtomicReference<WebSocket?>(null)
 
     fun connect(): Flow<ServerEvent> = callbackFlow {
+        Log.i(TAG, "ws connecting: $url")
         val req = Request.Builder().url(url).build()
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                Log.i(TAG, "ws open")
                 socket.set(webSocket)
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                Log.d(TAG, "ws message: ${text.take(200)}")
                 try {
                     val event = json.decodeFromString(ServerEvent.serializer(), text)
+                    Log.d(TAG, "parsed ${event.javaClass.simpleName}")
                     trySend(event)
-                } catch (_: Throwable) {
-                    // Ignore unrecognised messages — forward-compat with new types.
+                } catch (t: Throwable) {
+                    Log.w(TAG, "parse failed: ${t.message}")
                 }
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                Log.i(TAG, "ws closing: $code $reason")
                 webSocket.close(code, reason)
                 close(IllegalStateException("ws closing: $code $reason"))
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                Log.w(TAG, "ws failure: ${t.message}")
                 close(t)
             }
         }
@@ -58,10 +65,13 @@ class WatchSocket(
     fun send(msg: ClientMessage): Boolean {
         val ws = socket.get() ?: return false
         val text = json.encodeToString(ClientMessage.serializer(), msg)
+        Log.i(TAG, "ws send: $text")
         return ws.send(text)
     }
 
     companion object {
+        private const val TAG = "WatchSocket"
+
         val DEFAULT_JSON = Json {
             ignoreUnknownKeys = true
             classDiscriminator = "type"

@@ -4,11 +4,11 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.wear.compose.foundation.lazy.ScalingLazyColumn
 import androidx.wear.compose.material.Text
 import com.watchcode.net.Decision
@@ -16,8 +16,8 @@ import com.watchcode.viewmodel.ApprovalViewModel
 
 @Composable
 fun QueueScreen(vm: ApprovalViewModel) {
-    val approvals by vm.approvals.collectAsStateWithLifecycle()
-    val state by vm.connectionState.collectAsStateWithLifecycle()
+    val approvals by vm.approvals.collectAsState()
+    val state by vm.connectionState.collectAsState()
 
     if (approvals.isEmpty()) {
         Box(
