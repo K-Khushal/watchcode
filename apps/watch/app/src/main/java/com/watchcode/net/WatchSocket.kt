@@ -34,10 +34,8 @@ class WatchSocket(
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                Log.d(TAG, "ws message: ${text.take(200)}")
                 try {
                     val event = json.decodeFromString(ServerEvent.serializer(), text)
-                    Log.d(TAG, "parsed ${event.javaClass.simpleName}")
                     trySend(event)
                 } catch (t: Throwable) {
                     Log.w(TAG, "parse failed: ${t.message}")
@@ -65,7 +63,6 @@ class WatchSocket(
     fun send(msg: ClientMessage): Boolean {
         val ws = socket.get() ?: return false
         val text = json.encodeToString(ClientMessage.serializer(), msg)
-        Log.i(TAG, "ws send: $text")
         return ws.send(text)
     }
 

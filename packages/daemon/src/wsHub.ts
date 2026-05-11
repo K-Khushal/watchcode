@@ -31,18 +31,11 @@ export class WsHub {
         socket.destroy();
         return;
       }
-      // Mirror the loopback gate the http handler enforces. Slice 4 will
-      // add HMAC-based client_hello on top to authenticate paired watches.
-      const addr = req.socket.remoteAddress ?? "";
-      const isLoopback =
-        addr === "127.0.0.1" ||
-        addr === "::1" ||
-        addr === "::ffff:127.0.0.1";
-      if (!isLoopback) {
-        socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
-        socket.destroy();
-        return;
-      }
+      // Slice 3 ships unauthenticated WS — physical watches must reach the
+      // daemon over the LAN, so the upgrade cannot enforce a loopback gate.
+      // The HTTP routes (used only by the hook on the same host) keep their
+      // loopback restriction. Slice 4 replaces this with a signed
+      // `client_hello` and per-watch HMAC.
       this.wss.handleUpgrade(req, socket, head, (ws) => {
         this.wss.emit("connection", ws, req);
       });

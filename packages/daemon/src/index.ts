@@ -44,9 +44,18 @@ export async function startDaemon(opts: StartDaemonOptions = {}): Promise<Runnin
 }
 
 // When invoked directly (spawned by CLI), start the daemon.
+// `WATCHCODE_HOST=0.0.0.0` lets a LAN-attached watch reach the daemon during
+// slice-3 testing; the WS upgrade has no auth yet (slice 4 adds HMAC), so this
+// flag is opt-in and should only be set on a trusted network.
 const isEntry = import.meta.url === `file://${process.argv[1]}`;
 if (isEntry) {
-  startDaemon().catch((err) => {
+  // Reject a non-numeric WATCHCODE_PORT rather than passing NaN through to
+  // `server.listen`, which fails with a less obvious error.
+  const portParsed = Number.parseInt(process.env.WATCHCODE_PORT ?? "", 10);
+  startDaemon({
+    host: process.env.WATCHCODE_HOST,
+    port: Number.isFinite(portParsed) ? portParsed : undefined,
+  }).catch((err) => {
     console.error("daemon failed to start:", err);
     process.exit(1);
   });
