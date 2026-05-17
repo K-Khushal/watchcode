@@ -7,11 +7,13 @@ import android.os.IBinder
 import android.util.Log
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
-import com.watchcode.BuildConfig
 import com.watchcode.net.ClientMessage
+import com.watchcode.net.DaemonDiscovery
 import com.watchcode.net.Reconnector
 import com.watchcode.net.ServerEvent
 import com.watchcode.net.WatchSocket
+import com.watchcode.security.NonceCounter
+import com.watchcode.security.SecretStore
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -22,6 +24,9 @@ import kotlinx.coroutines.launch
 /**
  * Foreground service holding a [WifiManager.WifiLock] and the WebSocket
  * lifecycle. UI binds and consumes [approvals] / [connectionState].
+ *
+ * Slice 4: uses [DaemonDiscovery] (mDNS) to find the daemon URL and
+ * [SecretStore] + [NonceCounter] for HMAC-signed messages.
  */
 class ConnectionService : LifecycleService() {
 
@@ -32,7 +37,7 @@ class ConnectionService : LifecycleService() {
     private val binder = Binder()
     private var wifiLock: WifiManager.WifiLock? = null
     private var loopJob: Job? = null
-    private lateinit var socket: WatchSocket
+    private var socket: WatchSocket? = null
     @Volatile private var destroyed = false
 
     private val _connectionState = MutableStateFlow(ConnectionState.Disconnected)
@@ -49,14 +54,20 @@ class ConnectionService : LifecycleService() {
             .createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "watchcode:wifi")
             .apply { setReferenceCounted(false); acquire() }
 
-        socket = WatchSocket(BuildConfig.DAEMON_URL)
         loopJob = lifecycleScope.launch { runConnectionLoop() }
     }
 
     private suspend fun runConnectionLoop() {
+        val secretStore = SecretStore(this)
+        if (!secretStore.isPaired) {
+            Log.i(TAG, "not paired — waiting for pairing")
+            updateState(ConnectionState.NeedsPairing)
+            return
+        }
+
         val reconnector = Reconnector(
             wifiAvailable = applicationContext.wifiAvailableFlow(),
-            connect = { connectAndPump() },
+            connect = { connectAndPump(secretStore) },
         )
         try {
             reconnector.run()
@@ -65,17 +76,34 @@ class ConnectionService : LifecycleService() {
         }
     }
 
-    private suspend fun connectAndPump() {
+    private suspend fun connectAndPump(secretStore: SecretStore) {
+        updateState(ConnectionState.Searching)
+        val discovery = DaemonDiscovery(this)
+        val urls = discovery.discover()
+        if (urls.isEmpty()) {
+            Log.w(TAG, "mDNS: no daemon found")
+            throw IllegalStateException("no daemon found via mDNS")
+        }
+
+        val url = urls.first()
+        Log.i(TAG, "connecting to $url")
+
+        val nonceCounter = NonceCounter(this)
+        val ws = WatchSocket(
+            url = url,
+            watchId = secretStore.watchId!!,
+            secretHex = secretStore.secret!!,
+            nonceCounter = nonceCounter,
+        )
+        socket = ws
+
         updateState(ConnectionState.Connecting)
-        socket.connect().collect { event ->
-            // First message confirms the connection is live.
+        ws.connect().collect { event ->
             if (_connectionState.value != ConnectionState.Connected) {
                 updateState(ConnectionState.Connected)
             }
             handle(event)
         }
-        // The flow completed without throwing → server closed cleanly. Move to
-        // reconnecting and let the loop body retry.
         updateState(ConnectionState.Reconnecting)
         throw IllegalStateException("ws closed")
     }
@@ -83,7 +111,7 @@ class ConnectionService : LifecycleService() {
     private fun handle(event: ServerEvent) {
         when (event) {
             is ServerEvent.ApprovalRequest -> {
-                Log.i(TAG, "approval_request: id=${event.id} tool=${event.tool.name} title=${event.tool.title}")
+                Log.i(TAG, "approval_request: id=${event.id} tool=${event.tool.name}")
                 _approvals.update { it + event }
                 postApprovalNotification(event)
             }
@@ -92,16 +120,17 @@ class ConnectionService : LifecycleService() {
                 _approvals.update { list -> list.filter { it.id != event.request_id } }
                 cancelApprovalNotification()
             }
-            is ServerEvent.DaemonStatus -> Unit // heartbeat; quiet by design
+            is ServerEvent.DaemonStatus -> Unit
         }
     }
 
     fun respond(requestId: String, decision: String) {
-        val sent = socket.send(ClientMessage.ApprovalResponse(requestId, decision))
-        if (sent) {
-            // Daemon's `approval_resolved` broadcast will also remove the card,
-            // but optimistic removal on a confirmed send keeps the UI snappy.
-            _approvals.update { list -> list.filter { it.id != requestId } }
+        val ws = socket ?: return
+        lifecycleScope.launch {
+            val sent = ws.send(requestId, decision)
+            if (sent) {
+                _approvals.update { list -> list.filter { it.id != requestId } }
+            }
         }
     }
 
@@ -109,37 +138,26 @@ class ConnectionService : LifecycleService() {
         if (_connectionState.value == state) return
         _connectionState.value = state
         if (destroyed) return
-        // After the initial startForeground in onCreate the system has the
-        // notification in foreground state; later updates are safer via the
-        // notification manager so we don't accidentally re-promote a service
-        // that was just torn down.
         try {
             val mgr = getSystemService(android.app.NotificationManager::class.java)
             mgr?.notify(Notifications.NOTIFICATION_ID, Notifications.buildOngoing(this, state))
-        } catch (_: Throwable) {
-            // Notification updates are best-effort; never crash the loop.
-        }
+        } catch (_: Throwable) {}
     }
 
     private fun postApprovalNotification(req: ServerEvent.ApprovalRequest) {
         try {
-            val mgr = getSystemService(android.app.NotificationManager::class.java) ?: return
-            mgr.notify(
+            getSystemService(android.app.NotificationManager::class.java)?.notify(
                 Notifications.APPROVAL_NOTIFICATION_ID,
                 Notifications.buildApproval(this, req.id, req.tool.title, req.tool.body),
             )
-        } catch (_: Throwable) {
-            // Notification post is best-effort; the in-app card is the source of truth.
-        }
+        } catch (_: Throwable) {}
     }
 
     private fun cancelApprovalNotification() {
         try {
             getSystemService(android.app.NotificationManager::class.java)
                 ?.cancel(Notifications.APPROVAL_NOTIFICATION_ID)
-        } catch (_: Throwable) {
-            // ignore
-        }
+        } catch (_: Throwable) {}
     }
 
     override fun onBind(intent: Intent): IBinder {
@@ -152,7 +170,6 @@ class ConnectionService : LifecycleService() {
             val id = intent.getStringExtra(EXTRA_REQUEST_ID)
             val decision = intent.getStringExtra(EXTRA_DECISION)
             if (!id.isNullOrEmpty() && !decision.isNullOrEmpty()) {
-                Log.i(TAG, "responding from notification: id=$id decision=$decision")
                 respond(id, decision)
             }
         }
@@ -169,14 +186,12 @@ class ConnectionService : LifecycleService() {
 
     companion object {
         private const val TAG = "WatchCodeService"
-
         const val ACTION_RESPOND = "com.watchcode.action.RESPOND"
         const val EXTRA_REQUEST_ID = "request_id"
         const val EXTRA_DECISION = "decision"
 
         fun start(ctx: Context) {
-            val intent = Intent(ctx, ConnectionService::class.java)
-            androidx.core.content.ContextCompat.startForegroundService(ctx, intent)
+            androidx.core.content.ContextCompat.startForegroundService(ctx, Intent(ctx, ConnectionService::class.java))
         }
     }
 }

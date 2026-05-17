@@ -17,10 +17,8 @@ android {
         versionCode = 1
         versionName = "0.0.1"
 
-        // Hardcoded daemon URL until Slice 4 adds mDNS-based discovery.
-        // Override per build by passing -PdaemonUrl=ws://10.0.0.5:9876/ws
-        val daemonUrl = (project.findProperty("daemonUrl") as String?) ?: "ws://10.0.2.2:9876/ws"
-        buildConfigField("String", "DAEMON_URL", "\"$daemonUrl\"")
+        // Slice 4: daemon URL is discovered at runtime via mDNS (NsdManager).
+        // BuildConfig.DAEMON_URL has been removed.
     }
 
     buildTypes {
@@ -75,6 +73,8 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
 
     debugImplementation(libs.compose.ui.tooling)
+
+    implementation(libs.androidx.security.crypto)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)

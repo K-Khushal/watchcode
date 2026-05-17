@@ -16,9 +16,13 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import com.watchcode.service.ConnectionService
+import com.watchcode.service.ConnectionState
+import com.watchcode.ui.PairingScreen
 import com.watchcode.ui.QueueScreen
 import com.watchcode.ui.theme.WatchCodeTheme
 import com.watchcode.viewmodel.ApprovalViewModel
@@ -76,7 +80,18 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun AppRoot(viewModel: ApprovalViewModel) {
+    val connectionState by viewModel.connectionState.collectAsState()
     Box(modifier = Modifier.fillMaxSize()) {
-        QueueScreen(viewModel)
+        if (connectionState == ConnectionState.NeedsPairing) {
+            PairingScreen(
+                onPaired = {
+                    // The service will pick up the new credentials on its next
+                    // reconnect cycle; restart it to trigger immediately.
+                    viewModel.restartService()
+                },
+            )
+        } else {
+            QueueScreen(viewModel)
+        }
     }
 }

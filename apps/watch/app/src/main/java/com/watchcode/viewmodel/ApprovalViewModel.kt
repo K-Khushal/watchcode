@@ -1,5 +1,7 @@
 package com.watchcode.viewmodel
 
+import android.content.Context
+import android.content.Intent
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.watchcode.net.Decision
@@ -20,9 +22,11 @@ class ApprovalViewModel : ViewModel() {
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
     private var bound: ConnectionService? = null
+    private var appContext: Context? = null
 
     fun bind(service: ConnectionService) {
         bound = service
+        appContext = service.applicationContext
         viewModelScope.launch { service.approvals.collect { _approvals.value = it } }
         viewModelScope.launch { service.connectionState.collect { _connectionState.value = it } }
     }
@@ -33,5 +37,12 @@ class ApprovalViewModel : ViewModel() {
 
     fun respond(requestId: String, decision: Decision) {
         bound?.respond(requestId, decision.wire)
+    }
+
+    /** Called after successful pairing to restart the connection service. */
+    fun restartService() {
+        val ctx = appContext ?: return
+        ctx.stopService(Intent(ctx, ConnectionService::class.java))
+        ConnectionService.start(ctx)
     }
 }

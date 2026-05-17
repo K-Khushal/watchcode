@@ -6,6 +6,8 @@ import { buildPermissionRules, buildTitle } from "./rules.js";
 import { SlugExtractor } from "./slug.js";
 import { WsHub } from "./wsHub.js";
 import { Logger } from "./logger.js";
+import { readConfig, writeConfig, addWatch, removeWatch } from "./config.js";
+import { PairingManager } from "./pairing.js";
 import {
   DAEMON_HOST,
   DAEMON_PORT,
@@ -20,6 +22,7 @@ export interface ServerDeps {
   host?: string;
   version?: string;
   heartbeatMs?: number;
+  configPath?: string;
 }
 
 export interface RunningServer {
@@ -110,6 +113,27 @@ interface DecisionPostBody {
   permissionRules?: string[];
 }
 
+interface PairCompleteBody {
+  code: string;
+  device_name: string;
+}
+
+function isPairCompleteBody(x: unknown): x is PairCompleteBody {
+  if (!x || typeof x !== "object") return false;
+  const o = x as Record<string, unknown>;
+  return typeof o.code === "string" && typeof o.device_name === "string";
+}
+
+interface PairRemoveBody {
+  name: string;
+}
+
+function isPairRemoveBody(x: unknown): x is PairRemoveBody {
+  if (!x || typeof x !== "object") return false;
+  const o = x as Record<string, unknown>;
+  return typeof o.name === "string" && o.name !== "";
+}
+
 function isDecisionBody(x: unknown): x is DecisionPostBody {
   if (!x || typeof x !== "object") return false;
   const o = x as Record<string, unknown>;
@@ -128,15 +152,22 @@ export function startServer(deps: ServerDeps): Promise<RunningServer> {
   const host = deps.host ?? DAEMON_HOST;
   const version = deps.version ?? "0.0.0";
   const heartbeatMs = deps.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
+  const configPath = deps.configPath;
   const slugExtractor = new SlugExtractor();
+  const pairing = new PairingManager();
 
   const server = createServer(async (req, res) => {
     try {
-      if (!isLoopback(req)) {
+      const url = new URL(req.url ?? "/", `http://${host}:${port}`);
+      // POST /pair/complete is the one route the Galaxy Watch calls over LAN —
+      // the 6-digit pairing code is its authentication credential.
+      // All other routes are loopback-only (hook, CLI, status).
+      const isLanRoute =
+        req.method === "POST" && url.pathname === "/pair/complete";
+      if (!isLanRoute && !isLoopback(req)) {
         send(res, 403, { error: "loopback only" });
         return;
       }
-      const url = new URL(req.url ?? "/", `http://${host}:${port}`);
 
       // POST /pending
       if (req.method === "POST" && url.pathname === "/pending") {
@@ -272,6 +303,81 @@ export function startServer(deps: ServerDeps): Promise<RunningServer> {
         return;
       }
 
+      // POST /pair/begin
+      if (req.method === "POST" && url.pathname === "/pair/begin") {
+        const session = pairing.beginPairing();
+        logger.info("pair_begin", { code: "[REDACTED]" });
+        send(res, 200, {
+          code: session.code,
+          expires_in_seconds: 60,
+        });
+        return;
+      }
+
+      // GET /pair/status
+      if (req.method === "GET" && url.pathname === "/pair/status") {
+        const status = pairing.getStatus();
+        if (!status) {
+          // No session or window expired
+          send(res, 204);
+          return;
+        }
+        if (!status.active) {
+          // Session was completed successfully
+          send(res, 200, { active: false, completed: true });
+          return;
+        }
+        send(res, 200, {
+          active: true,
+          code: status.code,
+          seconds_remaining: status.secondsRemaining,
+        });
+        return;
+      }
+
+      // POST /pair/complete
+      if (req.method === "POST" && url.pathname === "/pair/complete") {
+        const body = await readJsonBody(req);
+        if (!isPairCompleteBody(body)) {
+          send(res, 400, { error: "invalid body: code and device_name required" });
+          return;
+        }
+        const watch = pairing.completePairing(body.code, body.device_name);
+        if (!watch) {
+          send(res, 403, { error: "invalid or expired pairing code" });
+          return;
+        }
+        if (configPath) {
+          const cfg = readConfig(configPath);
+          addWatch(configPath, cfg, watch);
+        }
+        logger.info("pair_complete", { watch_id: watch.id, name: watch.name });
+        send(res, 200, { watch_id: watch.id, secret: watch.secret });
+        return;
+      }
+
+      // POST /pair/remove
+      if (req.method === "POST" && url.pathname === "/pair/remove") {
+        const body = await readJsonBody(req);
+        if (!isPairRemoveBody(body)) {
+          send(res, 400, { error: "invalid body: name required" });
+          return;
+        }
+        if (!configPath) {
+          send(res, 404, { error: "watch not found" });
+          return;
+        }
+        const cfg = readConfig(configPath);
+        const removed = removeWatch(configPath, cfg, body.name);
+        if (!removed) {
+          send(res, 404, { error: "watch not found" });
+          return;
+        }
+        logger.info("pair_remove", { name: body.name });
+        send(res, 204);
+        return;
+      }
+
       send(res, 404, { error: "not found" });
     } catch (err) {
       logger.error("request failed", { err: String(err) });
@@ -317,6 +423,7 @@ export function startServer(deps: ServerDeps): Promise<RunningServer> {
     logger,
     heartbeatMs,
     version,
+    configPath,
     pendingCount: () => queue.list().length,
     activeSessions: () =>
       new Set(queue.list().map((p) => p.session_id)).size,

@@ -2,12 +2,11 @@ package com.watchcode.net
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
 /**
- * Mirrors `packages/shared/src/protocol.ts`. HMAC fields are reserved for
- * Slice 4 and ignored by the daemon in Slice 3.
+ * Mirrors `packages/shared/src/protocol.ts`.
+ * Slice 4: HMAC + nonce fields required on all outbound messages.
  */
 
 @Serializable
@@ -56,10 +55,22 @@ sealed class ServerEvent {
 @Serializable
 sealed class ClientMessage {
     @Serializable
+    @SerialName("client_hello")
+    data class ClientHello(
+        val watch_id: String,
+        val protocol_version: Int = 1,
+        val nonce: Long,
+        val hmac: String,
+    ) : ClientMessage()
+
+    @Serializable
     @SerialName("approval_response")
     data class ApprovalResponse(
+        val watch_id: String,
         val request_id: String,
         val decision: String,
+        val nonce: Long,
+        val hmac: String,
     ) : ClientMessage()
 }
 

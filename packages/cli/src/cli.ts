@@ -2,6 +2,8 @@
 import { Command } from "commander";
 import { startCommand } from "./commands/start.js";
 import { stopCommand } from "./commands/stop.js";
+import { pairCommand } from "./commands/pair.js";
+import { unpairCommand } from "./commands/unpair.js";
 
 const program = new Command();
 program
@@ -35,6 +37,21 @@ program
     for await (const c of process.stdin) chunks.push(c as Buffer);
     const out = await run(Buffer.concat(chunks).toString("utf8"));
     if (out !== null) process.stdout.write(JSON.stringify(out));
+  });
+
+program
+  .command("pair")
+  .description("Open a 60-second pairing window and display the code for the watch")
+  .action(async () => {
+    await pairCommand();
+  });
+
+program
+  .command("unpair")
+  .description("Remove a paired watch by name")
+  .argument("<name>", "Name of the watch to unpair")
+  .action(async (name: string) => {
+    await unpairCommand(name);
   });
 
 program.parseAsync().catch((e) => {

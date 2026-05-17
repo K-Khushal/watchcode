@@ -117,6 +117,8 @@ object Notifications {
     }
 
     private fun stateText(state: ConnectionState): String = when (state) {
+        ConnectionState.NeedsPairing -> "Tap to pair with daemon"
+        ConnectionState.Searching -> "Searching for daemon…"
         ConnectionState.Disconnected -> "Disconnected"
         ConnectionState.Connecting -> "Connecting…"
         ConnectionState.Connected -> "Connected"

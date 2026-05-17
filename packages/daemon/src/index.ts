@@ -4,6 +4,7 @@ import { Queue } from "./queue.js";
 import { createFileLogger } from "./logger.js";
 import { startServer, RunningServer } from "./server.js";
 import { writePidFile, removePidFile } from "./pidfile.js";
+import { publishMdns } from "./mdns.js";
 
 export interface StartDaemonOptions {
   port?: number;
@@ -13,20 +14,29 @@ export interface StartDaemonOptions {
 
 export async function startDaemon(opts: StartDaemonOptions = {}): Promise<RunningServer> {
   const home = opts.homeDir ?? join(homedir(), ".watchcode");
+  const configPath = join(home, "config.json");
   const logger = createFileLogger(join(home, "logs", "daemon.log"));
   const queue = new Queue();
   const pidPath = join(home, "daemon.pid");
 
   // Bind the port BEFORE writing the pid file so a failed bind never leaves a
   // stale pid pointing at a non-listening process.
-  const running = await startServer({ queue, logger, port: opts.port, host: opts.host });
+  // Default to 0.0.0.0 so the Galaxy Watch can reach /pair/complete and /ws
+  // over LAN.  Loopback-only routes (POST /pending, etc.) remain protected by
+  // the isLoopback guard inside server.ts.
+  const host = opts.host ?? "0.0.0.0";
+  const running = await startServer({ queue, logger, port: opts.port, host, configPath });
   writePidFile(pidPath);
+
+  const mdns = publishMdns("watchcode", running.port);
+  logger.info("mdns_published", { port: running.port });
 
   let shuttingDown = false;
   const shutdown = (signal: string): void => {
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info("shutdown", { signal });
+    mdns.stop();
     // Hard-deadline: if close() hangs, force-exit so the daemon is never
     // unkillable except by SIGKILL.
     const force = setTimeout(() => process.exit(1), 5_000);

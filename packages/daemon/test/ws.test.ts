@@ -5,16 +5,49 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Queue } from "../src/queue.js";
 import { startServer, RunningServer } from "../src/server.js";
+import { computeBodyHash, canonicalBytes, computeHmac } from "../src/hmac.js";
 import type { Logger } from "../src/logger.js";
 
 const noopLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} };
+
+const WATCH_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+const SECRET = "b".repeat(64);
+
+function buildConfigJson() {
+  return JSON.stringify({
+    watches: [{
+      id: WATCH_ID,
+      name: "Test Watch",
+      secret: SECRET,
+      paired_at: new Date().toISOString(),
+      last_seen: null,
+      last_nonce: 0,
+    }],
+  });
+}
+
+function signHello(nonce: number): object {
+  const partial = { type: "client_hello", watch_id: WATCH_ID, protocol_version: 1, nonce };
+  const hash = computeBodyHash(partial as Record<string, unknown>);
+  const canonical = canonicalBytes("client_hello", WATCH_ID, nonce, hash);
+  const hmac = computeHmac(SECRET, canonical);
+  return { ...partial, hmac };
+}
+
+let nonceCounter = 1;
 
 let queue: Queue;
 let running: RunningServer;
 let base: string;
 let wsUrl: string;
+let tmpDir: string;
+let configPath: string;
 
 beforeEach(async () => {
+  nonceCounter = 1;
+  tmpDir = mkdtempSync(join(tmpdir(), "wc-ws-"));
+  configPath = join(tmpDir, "config.json");
+  writeFileSync(configPath, buildConfigJson());
   queue = new Queue();
   running = await startServer({
     queue,
@@ -22,6 +55,7 @@ beforeEach(async () => {
     port: 0,
     heartbeatMs: 50,
     version: "test",
+    configPath,
   });
   base = `http://127.0.0.1:${running.port}`;
   wsUrl = `ws://127.0.0.1:${running.port}/ws`;
@@ -41,7 +75,10 @@ const post = (path: string, body?: unknown) =>
 const openWs = (): Promise<WebSocket> =>
   new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
-    ws.once("open", () => resolve(ws));
+    ws.once("open", () => {
+      ws.send(JSON.stringify(signHello(nonceCounter++)));
+      resolve(ws);
+    });
     ws.once("error", reject);
   });
 
@@ -161,13 +198,13 @@ describe("daemon WebSocket fan-out", () => {
     // Hook is long-polling
     const longPoll = fetch(`${base}/pending/${id}/decision?wait=2000`);
 
-    ws.send(
-      JSON.stringify({
-        type: "approval_response",
-        request_id: id,
-        decision: "always",
-      }),
-    );
+    // Approval responses require HMAC signing in Slice 4.
+    const nonce = nonceCounter++;
+    const partial = { type: "approval_response", watch_id: WATCH_ID, request_id: id, decision: "always", nonce };
+    const hash = computeBodyHash(partial as Record<string, unknown>);
+    const canonical = canonicalBytes("approval_response", WATCH_ID, nonce, hash);
+    const hmac = computeHmac(SECRET, canonical);
+    ws.send(JSON.stringify({ ...partial, hmac }));
 
     const resolved = await nextMessage(ws, (m) => m.type === "approval_resolved");
     expect(resolved.request_id).toBe(id);

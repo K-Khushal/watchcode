@@ -1,6 +1,8 @@
 package com.watchcode.net
 
 import android.util.Log
+import com.watchcode.security.HmacSigner
+import com.watchcode.security.NonceCounter
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -14,11 +16,17 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Thin wrapper over OkHttp WebSocket that emits parsed `ServerEvent` values.
- * The flow throws on socket failure so [Reconnector] can drive backoff.
+ * Thin wrapper over OkHttp WebSocket that emits parsed [ServerEvent] values.
+ *
+ * On connect, immediately sends a signed `client_hello` using [watchId],
+ * [secretHex], and [nonceCounter]. All subsequent [send] calls are also
+ * HMAC-signed.
  */
 class WatchSocket(
     private val url: String,
+    private val watchId: String,
+    private val secretHex: String,
+    private val nonceCounter: NonceCounter,
     private val client: OkHttpClient = defaultClient(),
     private val json: Json = DEFAULT_JSON,
 ) {
@@ -29,8 +37,27 @@ class WatchSocket(
         val req = Request.Builder().url(url).build()
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.i(TAG, "ws open")
+                Log.i(TAG, "ws open — sending client_hello")
                 socket.set(webSocket)
+                // NonceCounter.next() is thread-safe (AtomicLong + synchronous
+                // SharedPreferences commit), so it is safe to call here on the
+                // OkHttp I/O thread without needing runBlocking or a coroutine.
+                // The hello must arrive at the daemon within 5 seconds.
+                val nonce = nonceCounter.next()
+                val hmac = HmacSigner.sign(
+                    type = "client_hello",
+                    watchId = watchId,
+                    nonce = nonce,
+                    secretHex = secretHex,
+                    extraFields = mapOf("protocol_version" to 1),
+                )
+                val hello = ClientMessage.ClientHello(
+                    watch_id = watchId,
+                    protocol_version = 1,
+                    nonce = nonce,
+                    hmac = hmac,
+                )
+                webSocket.send(json.encodeToString(ClientMessage.serializer(), hello))
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -60,10 +87,24 @@ class WatchSocket(
         }
     }
 
-    fun send(msg: ClientMessage): Boolean {
+    fun send(requestId: String, decision: String): Boolean {
         val ws = socket.get() ?: return false
-        val text = json.encodeToString(ClientMessage.serializer(), msg)
-        return ws.send(text)
+        val nonce = nonceCounter.next()
+        val hmac = HmacSigner.sign(
+            type = "approval_response",
+            watchId = watchId,
+            nonce = nonce,
+            secretHex = secretHex,
+            extraFields = mapOf("decision" to decision, "request_id" to requestId),
+        )
+        val msg = ClientMessage.ApprovalResponse(
+            watch_id = watchId,
+            request_id = requestId,
+            decision = decision,
+            nonce = nonce,
+            hmac = hmac,
+        )
+        return ws.send(json.encodeToString(ClientMessage.serializer(), msg))
     }
 
     companion object {

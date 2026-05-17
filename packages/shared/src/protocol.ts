@@ -19,7 +19,8 @@ export const ApprovalRequestMsg = z.object({
   session: SessionInfo,
   tool: ToolInfo,
   timestamp: z.string(),
-  // HMAC fields are optional in slice 2; tightened in slice 4.
+  // ApprovalRequest is a daemon→watch broadcast; the watch does not sign it.
+  // These fields are kept optional for forward-compat but are never set today.
   nonce: z.number().int().nonnegative().optional(),
   hmac: z.string().regex(/^[0-9a-f]{64}$/).optional(),
 });
@@ -38,20 +39,32 @@ export const DaemonStatusMsg = z.object({
   version: z.string(),
 });
 
-// watch → daemon. HMAC fields land in slice 4; in slice 3 they are accepted
-// but ignored. `decision: ""` is reserved for future cancel/ack flows.
+// watch → daemon. HMAC fields are required in slice 4 (unauthenticated
+// approval responses are rejected via the manual guard in wsHub before this
+// schema even applies, but making them required here closes the type gap).
 export const ApprovalResponseMsg = z.object({
   type: z.literal("approval_response"),
   request_id: z.string().uuid(),
   decision: z.enum(["approve", "always", "deny"]),
-  nonce: z.number().int().nonnegative().optional(),
-  hmac: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  nonce: z.number().int().nonnegative(),
+  hmac: z.string().regex(/^[0-9a-f]{64}$/),
 });
 
 export type ApprovalRequest = z.infer<typeof ApprovalRequestMsg>;
 export type ApprovalResolved = z.infer<typeof ApprovalResolvedMsg>;
 export type DaemonStatus = z.infer<typeof DaemonStatusMsg>;
 export type ApprovalResponse = z.infer<typeof ApprovalResponseMsg>;
+
+// Slice 4: first WS frame from watch — must arrive within 5s of connect.
+export const ClientHelloMsg = z.object({
+  type: z.literal("client_hello"),
+  watch_id: z.string().uuid(),
+  protocol_version: z.number().int().positive(),
+  nonce: z.number().int().nonnegative(),
+  hmac: z.string().regex(/^[0-9a-f]{64}$/),
+});
+
+export type ClientHello = z.infer<typeof ClientHelloMsg>;
 
 export type DecisionKind = "approve" | "always" | "deny";
 
