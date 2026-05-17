@@ -113,6 +113,10 @@ class WatchSocket(
         val DEFAULT_JSON = Json {
             ignoreUnknownKeys = true
             classDiscriminator = "type"
+            // Fields with default values (e.g. protocol_version = 1) must be
+            // included in the wire JSON so the daemon's Zod schema can validate
+            // them. Without this, kotlinx.serialization silently drops them.
+            encodeDefaults = true
         }
 
         fun defaultClient(): OkHttpClient = OkHttpClient.Builder()

@@ -11,7 +11,9 @@ import kotlin.coroutines.resume
 
 private const val TAG = "DaemonDiscovery"
 private const val SERVICE_TYPE = "_watchcode._tcp."
-private const val DISCOVERY_TIMEOUT_MS = 30_000L
+// 4 s is enough for a real LAN mDNS response; on the emulator mDNS
+// never resolves so we fail fast and fall back to 127.0.0.1 / 10.0.2.2.
+private const val DISCOVERY_TIMEOUT_MS = 4_000L
 
 /**
  * Discovers a running watchcode daemon on the local network via mDNS.
@@ -36,7 +38,12 @@ class DaemonDiscovery(private val context: Context) {
         // Collect all discovered services within the timeout window.
         val firstResult = withTimeoutOrNull(DISCOVERY_TIMEOUT_MS) {
             suspendCancellableCoroutine { cont ->
-                val listener = object : NsdManager.DiscoveryListener {
+                // lateinit var instead of val so the object body can reference
+                // `listener` itself (e.g. to call stopServiceDiscovery).
+                // The variable is assigned before discoverServices is called,
+                // so all callbacks see the fully-initialized reference.
+                lateinit var listener: NsdManager.DiscoveryListener
+                listener = object : NsdManager.DiscoveryListener {
                     override fun onStartDiscoveryFailed(type: String, code: Int) {
                         Log.w(TAG, "startDiscovery failed: $code")
                         if (cont.isActive) cont.resume(null)

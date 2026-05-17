@@ -9,7 +9,7 @@
     "watchcode-hook": "dist/cli.js"
   },
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b --clean && tsc -b",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext .ts",
     "clean": "rm -rf dist *.tsbuildinfo"

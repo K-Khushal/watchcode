@@ -79,10 +79,13 @@ class ConnectionService : LifecycleService() {
     private suspend fun connectAndPump(secretStore: SecretStore) {
         updateState(ConnectionState.Searching)
         val discovery = DaemonDiscovery(this)
-        val urls = discovery.discover()
+        var urls = discovery.discover()
         if (urls.isEmpty()) {
-            Log.w(TAG, "mDNS: no daemon found")
-            throw IllegalStateException("no daemon found via mDNS")
+            // On the Android emulator mDNS multicast doesn't reach the host.
+            // Fall back to localhost (via `adb reverse tcp:9876 tcp:9876`) and
+            // the emulator's special host-loopback alias so e2e tests work.
+            Log.w(TAG, "mDNS: no daemon found — trying emulator fallback")
+            urls = listOf("ws://127.0.0.1:9876/ws", "ws://10.0.2.2:9876/ws")
         }
 
         val url = urls.first()
@@ -122,6 +125,18 @@ class ConnectionService : LifecycleService() {
             }
             is ServerEvent.DaemonStatus -> Unit
         }
+    }
+
+    /**
+     * Re-runs the connection loop on the existing service instance.
+     * Called by the ViewModel after a successful pairing so the service
+     * picks up the new credentials without needing a full stop/start
+     * (which doesn't work while the service is bound — Android keeps the
+     * instance alive and onCreate never fires again).
+     */
+    fun reconnect() {
+        loopJob?.cancel()
+        loopJob = lifecycleScope.launch { runConnectionLoop() }
     }
 
     fun respond(requestId: String, decision: String) {

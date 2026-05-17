@@ -39,10 +39,18 @@ class ApprovalViewModel : ViewModel() {
         bound?.respond(requestId, decision.wire)
     }
 
-    /** Called after successful pairing to restart the connection service. */
+    /** Called after successful pairing to pick up the new credentials. */
     fun restartService() {
-        val ctx = appContext ?: return
-        ctx.stopService(Intent(ctx, ConnectionService::class.java))
-        ConnectionService.start(ctx)
+        val svc = bound
+        if (svc != null) {
+            // Service is already bound — call reconnect() directly so
+            // runConnectionLoop() reruns on the existing instance.
+            // stopService + start does NOT work here: while the service is
+            // bound Android keeps the instance alive and onCreate never fires.
+            svc.reconnect()
+        } else {
+            val ctx = appContext ?: return
+            ConnectionService.start(ctx)
+        }
     }
 }
