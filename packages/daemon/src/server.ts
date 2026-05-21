@@ -4,6 +4,7 @@ import { basename } from "node:path";
 import { Queue, PendingApproval } from "./queue.js";
 import { buildPermissionRules, buildTitle } from "./rules.js";
 import { SlugExtractor } from "./slug.js";
+import { ProjectNameResolver } from "./projectName.js";
 import { WsHub } from "./wsHub.js";
 import { Logger } from "./logger.js";
 import { readConfig, writeConfig, addWatch, removeWatch } from "./config.js";
@@ -154,6 +155,7 @@ export function startServer(deps: ServerDeps): Promise<RunningServer> {
   const heartbeatMs = deps.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
   const configPath = deps.configPath;
   const slugExtractor = new SlugExtractor();
+  const projectNames = new ProjectNameResolver(logger);
   const pairing = new PairingManager();
 
   const server = createServer(async (req, res) => {
@@ -179,6 +181,7 @@ export function startServer(deps: ServerDeps): Promise<RunningServer> {
         const id = randomUUID();
         const slug = slugExtractor.extract(body.session_id, body.transcript_path);
         const cwd_basename = basename(body.cwd) || body.cwd;
+        const project_name = projectNames.resolve(body.cwd);
         const title = buildTitle(body.tool_name, body.tool_input);
         const pending: PendingApproval = {
           id,
@@ -201,7 +204,7 @@ export function startServer(deps: ServerDeps): Promise<RunningServer> {
         hub.broadcast({
           type: "approval_request",
           id,
-          session: { id: body.session_id, slug, cwd_basename },
+          session: { id: body.session_id, slug, cwd_basename, project_name },
           tool: {
             name: body.tool_name,
             title,

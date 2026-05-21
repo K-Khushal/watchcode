@@ -1,4 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { WebSocket } from "ws";
 import { Queue } from "../src/queue.js";
 import { startServer, RunningServer } from "../src/server.js";
 import type { Logger } from "../src/logger.js";
@@ -142,5 +146,154 @@ describe("daemon HTTP server", () => {
       decision: "approve",
     });
     expect(res.status).toBe(404);
+  });
+
+  it("approval_request broadcast carries project_name when .watchcode.json is found upward", async () => {
+    const projRoot = mkdtempSync(join(tmpdir(), "wc-proj-"));
+    try {
+      const deep = join(projRoot, "src", "api");
+      mkdirSync(deep, { recursive: true });
+      writeFileSync(
+        join(projRoot, ".watchcode.json"),
+        JSON.stringify({ name: "Customer API" }),
+      );
+
+      // Subscribe a raw WS client to observe broadcasts (no auth required to
+      // receive broadcasts; sending approval_response is what requires auth).
+      const ws = new WebSocket(`ws://127.0.0.1:${running.port}/ws`);
+      const received: unknown[] = [];
+      ws.on("message", (buf) => received.push(JSON.parse(buf.toString())));
+      await new Promise<void>((res) => ws.once("open", () => res()));
+
+      const enq = await post("/pending", {
+        session_id: "s-proj",
+        transcript_path: "/tmp/x",
+        cwd: deep,
+        tool_name: "Bash",
+        tool_input: { command: "ls" },
+      });
+      expect(enq.status).toBe(200);
+
+      // Wait briefly for the broadcast frame to land
+      await new Promise((r) => setTimeout(r, 50));
+      ws.close();
+
+      const req = received.find(
+        (m): m is { type: string; session: { project_name?: string | null } } =>
+          typeof m === "object" && m !== null && (m as { type?: string }).type === "approval_request",
+      );
+      expect(req).toBeDefined();
+      expect(req!.session.project_name).toBe("Customer API");
+    } finally {
+      rmSync(projRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("approval_request broadcast has project_name=null when no .watchcode.json upward", async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${running.port}/ws`);
+    const received: unknown[] = [];
+    ws.on("message", (buf) => received.push(JSON.parse(buf.toString())));
+    await new Promise<void>((res) => ws.once("open", () => res()));
+
+    await post("/pending", {
+      session_id: "s-nope",
+      transcript_path: "/tmp/x",
+      cwd: "/tmp",
+      tool_name: "Bash",
+      tool_input: { command: "ls" },
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    ws.close();
+
+    const req = received.find(
+      (m): m is { type: string; session: { project_name?: string | null } } =>
+        typeof m === "object" && m !== null && (m as { type?: string }).type === "approval_request",
+    );
+    expect(req).toBeDefined();
+    expect(req!.session.project_name).toBeNull();
+  });
+
+  it("3 concurrent /pending calls coexist as distinct queue entries", async () => {
+    const enqs = await Promise.all(
+      [1, 2, 3].map((n) =>
+        post("/pending", {
+          session_id: `s${n}`,
+          transcript_path: `/tmp/t${n}`,
+          cwd: `/tmp/proj${n}`,
+          tool_name: "Bash",
+          tool_input: { command: `echo ${n}` },
+        }),
+      ),
+    );
+    const ids = await Promise.all(enqs.map((r) => r.json() as Promise<{ id: string }>));
+    const unique = new Set(ids.map((x) => x.id));
+    expect(unique.size).toBe(3);
+    expect(queue.list().length).toBe(3);
+
+    // Resolving one does NOT affect the others.
+    await post(`/pending/${ids[0]!.id}/decision`, { decision: "approve" });
+    expect(queue.list().length).toBe(2);
+    expect(queue.findByRequestId(ids[1]!.id)).toBeDefined();
+    expect(queue.findByRequestId(ids[2]!.id)).toBeDefined();
+  });
+
+  it("race: two POST decisions on same id — first wins (204), second is 409", async () => {
+    const enq = await post("/pending", {
+      session_id: "s-race",
+      transcript_path: "/tmp/x",
+      cwd: "/tmp",
+      tool_name: "Bash",
+      tool_input: { command: "ls" },
+    });
+    const { id } = (await enq.json()) as { id: string };
+    const [a, b] = await Promise.all([
+      post(`/pending/${id}/decision`, { decision: "approve" }),
+      post(`/pending/${id}/decision`, { decision: "deny" }),
+    ]);
+    const statuses = [a.status, b.status].sort();
+    expect(statuses).toEqual([204, 409]);
+  });
+
+  it("multi-watch: broadcast reaches all connected ws clients and approval_resolved fans out", async () => {
+    const ws1 = new WebSocket(`ws://127.0.0.1:${running.port}/ws`);
+    const ws2 = new WebSocket(`ws://127.0.0.1:${running.port}/ws`);
+    const got1: unknown[] = [];
+    const got2: unknown[] = [];
+    ws1.on("message", (b) => got1.push(JSON.parse(b.toString())));
+    ws2.on("message", (b) => got2.push(JSON.parse(b.toString())));
+    await Promise.all([
+      new Promise<void>((r) => ws1.once("open", () => r())),
+      new Promise<void>((r) => ws2.once("open", () => r())),
+    ]);
+
+    const enq = await post("/pending", {
+      session_id: "s-multi",
+      transcript_path: "/tmp/x",
+      cwd: "/tmp",
+      tool_name: "Bash",
+      tool_input: { command: "ls" },
+    });
+    const { id } = (await enq.json()) as { id: string };
+    await new Promise((r) => setTimeout(r, 50));
+
+    const hasReq = (arr: unknown[]) =>
+      arr.some((m) => (m as { type?: string }).type === "approval_request");
+    expect(hasReq(got1)).toBe(true);
+    expect(hasReq(got2)).toBe(true);
+
+    await post(`/pending/${id}/decision`, { decision: "approve" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const hasResolved = (arr: unknown[]) =>
+      arr.some(
+        (m) =>
+          (m as { type?: string; request_id?: string }).type === "approval_resolved" &&
+          (m as { request_id?: string }).request_id === id,
+      );
+    expect(hasResolved(got1)).toBe(true);
+    expect(hasResolved(got2)).toBe(true);
+
+    ws1.close();
+    ws2.close();
   });
 });

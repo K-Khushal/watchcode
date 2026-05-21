@@ -131,3 +131,45 @@ correction.
 
 Defined in `packages/shared/src/protocol.ts`. HMAC fields on
 `approval_request` are optional in Slice 2 and tightened in Slice 4.
+
+## `.watchcode.json` project override (Slice 5)
+
+On every `POST /pending`, the daemon walks upward from the request's `cwd`
+toward the filesystem root looking for a file named `.watchcode.json`. The
+first one found wins. Schema:
+
+```json
+{ "name": "Customer API" }
+```
+
+The `name` field — if it is a non-empty string — is broadcast on the
+`approval_request` as `session.project_name`. Cache key is `cwd`; the
+cached entry is invalidated whenever the file's `mtime` changes or the
+file disappears. A null lookup is NOT cached, so adding a
+`.watchcode.json` mid-session takes effect on the next approval.
+
+### Watch heading priority
+
+The watch displays the first non-null value of:
+
+1. `session.project_name` (`.watchcode.json` override)
+2. `session.slug` (Claude Code transcript slug)
+3. `session.cwd_basename` (fallback)
+
+When `project_name` is present it fully replaces the slug/cwd pill — both
+become irrelevant for display purposes.
+
+## Multi-session / multi-watch behavior (Slice 5)
+
+- The daemon's `Queue` keys entries by request id (UUID), not by
+  `session_id`. Concurrent `claude` sessions therefore coexist as
+  independent queue entries with distinct `session.slug` /
+  `session.cwd_basename` / `session.project_name` labels.
+- `approval_request` is broadcast to every open WebSocket client. With
+  multiple paired watches online, all of them buzz and display the same
+  card.
+- `Queue.resolve(id, ...)` is idempotent: the first valid decision wins,
+  any subsequent decision for the same id returns `409 already resolved`
+  on the HTTP layer and is silently dropped on the WS path. The daemon
+  emits one `approval_resolved` broadcast on the winning decision so
+  every other watch can auto-dismiss its copy of the card.

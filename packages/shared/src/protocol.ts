@@ -4,6 +4,9 @@ export const SessionInfo = z.object({
   id: z.string(),
   slug: z.string().nullable(),
   cwd_basename: z.string(),
+  // Slice 5: `.watchcode.json { "name": ... }` upward-walk override.
+  // Takes precedence over slug on the watch UI when present.
+  project_name: z.string().nullable().optional(),
 });
 
 export const ToolInfo = z.object({

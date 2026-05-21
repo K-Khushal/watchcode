@@ -42,7 +42,12 @@ fun ApprovalCard(
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         Text(
-            text = request.session.slug ?: request.session.cwd_basename,
+            // Heading priority (see docs/protocol.md): project_name > slug > cwd_basename.
+            // project_name comes from `.watchcode.json { "name": ... }` upward-walked
+            // from the session cwd; when present it is the canonical project label.
+            text = request.session.project_name
+                ?: request.session.slug
+                ?: request.session.cwd_basename,
             style = MaterialTheme.typography.caption1,
             color = Color(0xFFBBBBBB),
             maxLines = 1,

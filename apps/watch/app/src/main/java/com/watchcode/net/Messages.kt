@@ -14,6 +14,9 @@ data class SessionInfo(
     val id: String,
     val slug: String? = null,
     val cwd_basename: String,
+    // Slice 5: `.watchcode.json { "name": ... }` upward-walk override.
+    // Takes precedence over slug as the heading on the watch card.
+    val project_name: String? = null,
 )
 
 @Serializable
